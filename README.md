@@ -130,14 +130,24 @@ WASAPI loopback 拿的是默认输出设备上混音后的数据，因此整机�
 
 ## 安装
 
+从 npm 装：
+
+```bash
+pnpm add cortico-world-music-companion
+```
+
+或在 Coopanion 里：高级模式 →「扩展」→ 手动安装 → 填安装后的包目录路径 → 重启进程 →
+「World 总览」启用音乐伙伴。启用状态写在 `worlds.music.enabled`，之后一直有效。
+
+从源码装：
+
 ```bash
 corepack pnpm install
 corepack pnpm typecheck && corepack pnpm test
-corepack pnpm run build     # 面板产物 dist/webui.js，发布前要重新生成
+corepack pnpm run build     # 面板产物 dist/webui.js；仓库里已经带了，改过面板才要重建
 ```
 
-在 Coopanion 里：高级模式 →「扩展」→ 手动安装 → 填本目录的绝对路径 → 重启进程 →
-「World 总览」启用 Music。启用状态写在 `worlds.music.enabled`，之后一直有效。
+`dist/webui.js` 是构建产物，随仓库一起发布，所以克隆下来直接就能装，不需要构建工具。
 
 ## 隐私与代价
 
