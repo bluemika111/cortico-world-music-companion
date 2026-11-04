@@ -1,0 +1,6 @@
+# pnpm 11 reads most .npmrc settings from this file, which keeps the repository free of an
+# .npmrc that npm itself would warn about. A hoisted node_modules is needed because pnpm's
+# junction layout is not followed reliably by Node's module resolution on every Windows host.
+nodeLinker: hoisted
+allowBuilds:
+  esbuild: true

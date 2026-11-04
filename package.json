@@ -1,0 +1,77 @@
+{
+  "name": "cortico-world-music-companion",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Music Companion — a Cortico World that lets the bot hear what this machine is playing: the track, what it sounds like, and the lyric line being sung right now",
+  "license": "MIT",
+  "keywords": [
+    "cortico-world",
+    "cortico",
+    "music",
+    "music-companion",
+    "wasapi",
+    "smtc",
+    "lyrics"
+  ],
+  "os": [
+    "win32"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@11.28.6",
+  "author": "bluemika111",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bluemika111/cortico-world-music-companion.git"
+  },
+  "homepage": "https://github.com/bluemika111/cortico-world-music-companion#readme",
+  "bugs": {
+    "url": "https://github.com/bluemika111/cortico-world-music-companion/issues"
+  },
+  "main": "./src/index.ts",
+  "cortico": {
+    "kind": "world",
+    "api": 6,
+    "displayName": "Music Companion",
+    "webUiClient": "dist/webui.js",
+    "locales": {
+      "zh": {
+        "displayName": "音乐伙伴",
+        "description": "听见这台电脑在放什么：歌名、歌手、此刻唱到哪一句，以及这段声音听起来什么样。"
+      },
+      "en": {
+        "displayName": "Music Companion",
+        "description": "Hears what this machine is playing: the track, the artist, the line being sung right now, and what the sound itself is like."
+      }
+    },
+    "tags": [
+      "internet",
+      "apps",
+      "sensitive-data"
+    ],
+    "describe": "describe.json"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "describe.json"
+  ],
+  "scripts": {
+    "build": "esbuild src/webui/client.ts --bundle --format=esm --platform=browser --target=es2020 --outfile=dist/webui.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.web.json --noEmit",
+    "probe": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/music.ps1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "cortico": "^0.2.3",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
