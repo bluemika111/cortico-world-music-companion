@@ -1,5 +1,8 @@
 # 音乐伙伴 · cortico-world-music-companion
 
+[![npm](https://img.shields.io/npm/v/cortico-world-music-companion)](https://www.npmjs.com/package/cortico-world-music-companion)
+[![license](https://img.shields.io/npm/l/cortico-world-music-companion)](https://github.com/bluemika111/cortico-world-music-companion/blob/main/LICENSE)
+
 Owner: `src/definition.ts`
 
 Cortico World：让桌宠听见这台电脑在放什么。歌名、歌手、来源应用、播放到哪一秒，
