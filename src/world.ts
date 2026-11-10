@@ -32,6 +32,10 @@ const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url
 const RECORD_FILE = 'music-listened.jsonl';
 /** 事件正文等歌词等这么久，拿不到就先发。 */
 const LYRICS_WAIT_MS = 1_500;
+/** 探测子进程没起来时的退避；系统媒体服务在开机后的一小段时间里常常还没就绪。 */
+const PROBE_RETRY_MS = 60_000;
+/** 连续这么多次采样失败就换一个新的子进程。 */
+const PROBE_MAX_FAILURES = 3;
 
 export interface MusicWorldOptions {
   cfg: MusicConfigSection;
@@ -141,6 +145,16 @@ export class MusicWorld implements World {
 
   private host: WorldHost | null = null;
   private probe: MusicProbe | null = null;
+  /** 上一次探测初始化失败的退避时刻；到点之前不再起子进程。 */
+  private probeRetryAt = 0;
+  /** 正在进行的初始化，避免同一时刻并发出两遍。 */
+  private probeInit: Promise<MusicProbe | null> | null = null;
+  /** 连续采样失败次数；够多次就换一个新的子进程。 */
+  private probeFailures = 0;
+  /** 上一次初始化失败的原因，面板直接显示，省得猜。 */
+  private probeLastError = '';
+  /** 平台不支持时只记一次日志。 */
+  private probeUnsupported = false;
   private watcher: MusicWatcher;
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -198,30 +212,9 @@ export class MusicWorld implements World {
   async start(host: WorldHost): Promise<void> {
     this.host = host;
     this.running = true;
-    this.probe = this.opts.probe === undefined ? createMusicProbe() : this.opts.probe;
-    if (!this.probe) {
-      host.log.warn('音乐伙伴只支持 Windows；这个系统上读不到媒体会话，不发事件。');
-      return;
-    }
     this.watcher = this.newWatcher();
-    try {
-      const caps = await this.probe.capabilities();
-      if (!caps.smtc) {
-        host.log.warn('这台机器上读不到系统媒体会话（SMTC），音乐伙伴不启动。');
-        this.probe = null;
-        return;
-      }
-      if (caps.loopbackError) {
-        host.log.warn('输出回路打不开，这一项只有歌名、没有听感。', { error: caps.loopbackError });
-      }
-      if (!caps.etw) {
-        host.log.info('进程启动检测跑在快照差分上（提权后走 ETW）。', { reason: caps.etwError });
-      }
-    } catch (err) {
-      host.log.warn('音乐探测进程没有起来', { err });
-      this.probe = null;
-      return;
-    }
+    this.probeRetryAt = 0;
+    // 这里不等探测就绪：系统媒体服务没起来时那一次会失败，挂载不该被它卡住。
     this.schedule();
     void this.tick();
   }
@@ -232,22 +225,83 @@ export class MusicWorld implements World {
     this.timer = null;
     this.probe?.close();
     this.probe = null;
+    this.probeInit = null;
+    this.probeRetryAt = 0;
+    this.probeFailures = 0;
+    this.probeUnsupported = false;
     this.watcher.reset();
     this.warm.clear();
     this.host = null;
   }
 
+  /**
+   * 惰性取得探测子进程。启动那一刻系统媒体服务常常还没就绪，失败不能就此放弃：
+   * 退避一会儿再试，面板上的「扫描播放器」则立刻重试一次。
+   */
+  private async ensureProbe(force = false): Promise<MusicProbe | null> {
+    if (this.probe) return this.probe;
+    if (this.opts.probe === null) return null; // 调用方明确说这个系统上没有
+    if (this.probeInit) return this.probeInit;
+    if (!force && this.clock() < this.probeRetryAt) return null;
+
+    this.probeInit = (async () => {
+      const probe = this.opts.probe === undefined ? createMusicProbe() : this.opts.probe;
+      if (!probe) {
+        if (!this.probeUnsupported) {
+          this.probeUnsupported = true;
+          this.host?.log.warn('音乐伙伴只支持 Windows；这个系统上读不到媒体会话，不发事件。');
+        }
+        this.probeRetryAt = Number.POSITIVE_INFINITY;
+        return null;
+      }
+      try {
+        const caps = await probe.capabilities();
+        if (!caps.smtc) {
+          try { probe.close(); } catch { /* 已经退出 */ }
+          this.probeLastError = 'powershell 起来了，但读不到系统媒体会话（SMTC 初始化失败）';
+          this.host?.log.warn('读不到系统媒体会话（SMTC），稍后再试。');
+          this.probeRetryAt = this.clock() + PROBE_RETRY_MS;
+          return null;
+        }
+        if (caps.loopbackError) {
+          this.host?.log.warn('输出回路打不开，这一项只有歌名、没有听感。', { error: caps.loopbackError });
+        }
+        this.host?.log.debug('进程启动检测按进程快照差分。', { reason: caps.startsNote });
+        this.probe = probe;
+        this.probeFailures = 0;
+        this.probeLastError = '';
+        return probe;
+      } catch (err) {
+        this.probeLastError = err instanceof Error ? err.message : String(err);
+        this.host?.log.warn('音乐探测进程没有起来，稍后再试', { err });
+        try { probe.close(); } catch { /* 已经退出 */ }
+        this.probeRetryAt = this.clock() + PROBE_RETRY_MS;
+        return null;
+      } finally {
+        this.probeInit = null;
+      }
+    })();
+    return this.probeInit;
+  }
+
   private async invokePanel(panel: string, method: string, args: unknown[]): Promise<unknown> {
     if (panel !== 'players') throw new Error(`unknown panel: ${panel}`);
-    if (method === 'scan') return this.scanPlayers();
+    if (method === 'scan') return this.scanPlayers(true);
     if (method === 'save') return this.savePlayers(args[0]);
     throw new Error(`unknown method: ${method}`);
   }
 
-  /** 此刻系统里认识的播放器，给面板勾选。 */
-  private async scanPlayers(): Promise<{ rows: ScanRow[]; selected: string[]; note?: string }> {
-    const probe = this.probe;
-    if (!probe) return { rows: [], selected: [], note: '这台机器上读不到媒体会话。' };
+  /** 此刻系统里认识的播放器，给面板勾选。面板点一次就立刻重试，不必等退避。 */
+  private async scanPlayers(force = false): Promise<{ rows: ScanRow[]; selected: string[]; note?: string }> {
+    const probe = await this.ensureProbe(force);
+    if (!probe) {
+      const why = this.probeLastError || '探测进程还没起来';
+      return {
+        rows: [],
+        selected: parsePlayers(this.opts.cfg.players),
+        note: `${why}。一分钟内会自动重试；再点一次「扫描播放器」可以立刻重试。`,
+      };
+    }
     let snapshot: ProbeSnapshot;
     try {
       snapshot = await probe.snapshot();
@@ -320,16 +374,26 @@ export class MusicWorld implements World {
 
   private async tick(): Promise<void> {
     const host = this.host;
-    const probe = this.probe;
-    if (!this.running || !host || !probe || this.ticking) return;
+    if (!this.running || !host || this.ticking) return;
     this.ticking = true;
     try {
+      const probe = await this.ensureProbe();
+      if (!probe) return;
       let snapshot: ProbeSnapshot;
       try {
         snapshot = this.filterSnapshot(await probe.snapshot());
+        this.probeFailures = 0;
       } catch (err) {
         // 采样失败不等于他关掉了音乐：这一拍跳过，状态保持不变。
-        host.log.warn('音乐探测采样失败', { err });
+        this.probeFailures += 1;
+        host.log.warn('音乐探测采样失败', { err, failures: this.probeFailures });
+        if (this.probeFailures >= PROBE_MAX_FAILURES) {
+          // 连续失败说明这个子进程已经不中用了，丢掉它，下一拍重新起一个。
+          try { probe.close(); } catch { /* 已经退出 */ }
+          this.probe = null;
+          this.probeFailures = 0;
+          this.probeRetryAt = 0;
+        }
         return;
       }
       this.lastSnapshot = snapshot;
@@ -511,8 +575,8 @@ export class MusicWorld implements World {
     return {
       ...MUSIC_TOOL_DECLS[0],
       handler: async () => {
-        const probe = this.probe;
-        if (!probe) return '这台机器上读不到系统媒体会话，听不到音乐。';
+        const probe = await this.ensureProbe();
+        if (!probe) return `探测子进程还没起来${this.probeLastError ? `（${this.probeLastError}）` : ''}，稍后再试一次。`;
         let snapshot: ProbeSnapshot;
         try {
           snapshot = this.filterSnapshot(await probe.snapshot());
@@ -578,9 +642,9 @@ export class MusicWorld implements World {
     return {
       ...MUSIC_TOOL_DECLS[1],
       handler: async (args: Record<string, unknown>) => {
-        const probe = this.probe;
-        if (!probe) return '这台机器上读不到系统媒体会话。';
         if (!this.opts.cfg.lyrics) return '同步歌词这个开关是关着的。';
+        const probe = await this.ensureProbe();
+        if (!probe) return `探测子进程还没起来${this.probeLastError ? `（${this.probeLastError}）` : ''}，稍后再试一次。`;
         let snapshot: ProbeSnapshot;
         try {
           snapshot = this.filterSnapshot(await probe.snapshot());

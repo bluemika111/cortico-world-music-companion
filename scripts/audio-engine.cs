@@ -1,19 +1,16 @@
 // Audio engine behind scripts/music.ps1. Plain ASCII: Windows PowerShell 5.1 reads a BOM-less
 // script as ANSI, so a stray non-ASCII byte would break parsing.
 //
-// Three things live here, all reachable from PowerShell as static members:
+// Two things live here, both reachable from PowerShell as static members:
 //   Engine    - WASAPI loopback capture on the default render endpoint, reduced to a sliding
 //               window of loudness / band / rhythm features (no audio ever leaves this process)
 //   AudioSessions - which processes hold an audio session right now, and in what state
-//   ProcWatch - process starts: a real ETW subscription when the caller is elevated, otherwise
-//               nothing (music.ps1 falls back to snapshot differencing)
 //
 // Compiled once at startup by Add-Type. Nothing here touches the network or the disk.
 
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Diagnostics.Eventing.Reader;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -756,119 +753,8 @@ namespace CooMusic
         }
     }
 
-    /**
-     * Process starts from the kernel provider, through a real ETW-backed event log subscription.
-     * Needs elevation: the analytic channel is disabled and cannot be enabled by a standard user.
-     * Start() returns "" on success or the reason it could not subscribe.
-     */
-    public static class ProcWatch
-    {
-        const string Channel = "Microsoft-Windows-Kernel-Process/Analytic";
-        static EventLogWatcher watcher;
-        static readonly object gate = new object();
-        static readonly List<KeyValuePair<long, string>> starts = new List<KeyValuePair<long, string>>();
-
-        public static string Start()
-        {
-            lock (gate)
-            {
-                if (watcher != null) return "";
-                try
-                {
-                    // Enable the analytic channel, which is off by default and needs admin.
-                    var psi = new ProcessStartInfo("wevtutil.exe", "sl " + Channel + " /e:true")
-                    {
-                        CreateNoWindow = true,
-                        UseShellExecute = false,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true
-                    };
-                    using (var p = Process.Start(psi))
-                    {
-                        p.WaitForExit(5000);
-                        if (p.ExitCode != 0) return "wevtutil exit " + p.ExitCode;
-                    }
-
-                    var query = new EventLogQuery(Channel, PathType.LogName)
-                    {
-                        TolerateQueryErrors = true
-                    };
-                    var local = new EventLogWatcher(query);
-                    local.EventRecordWritten += OnRecord;
-                    local.Enabled = true;
-                    watcher = local;
-                    return "";
-                }
-                catch (Exception ex)
-                {
-                    return ex.GetType().Name + ": " + ex.Message;
-                }
-            }
-        }
-
-        static void OnRecord(object sender, EventRecordWrittenEventArgs e)
-        {
-            if (e == null || e.EventRecord == null) return;
-            try
-            {
-                using (var record = e.EventRecord)
-                {
-                    // Provider event id 1 is ProcessStart; its first field is the image name.
-                    if (record.Id != 1) return;
-                    string image = "";
-                    try
-                    {
-                        if (record.Properties.Count > 0 && record.Properties[0].Value != null)
-                            image = record.Properties[0].Value.ToString();
-                    }
-                    catch { }
-                    if (image.Length == 0) return;
-                    int slash = image.LastIndexOf('\\');
-                    if (slash >= 0) image = image.Substring(slash + 1);
-                    if (image.Length == 0) return;
-                    lock (gate)
-                    {
-                        starts.Add(new KeyValuePair<long, string>(DateTime.UtcNow.Ticks, image.ToLowerInvariant()));
-                        if (starts.Count > 256) starts.RemoveRange(0, starts.Count - 256);
-                    }
-                }
-            }
-            catch { }
-        }
-
-        /** Everything seen since the previous call, oldest first, then forget it. */
-        public static string Drain()
-        {
-            lock (gate)
-            {
-                var sb = new StringBuilder(256);
-                sb.Append('[');
-                for (int i = 0; i < starts.Count; i++)
-                {
-                    if (i > 0) sb.Append(',');
-                    sb.Append("{\"name\":").Append(Engine.Str(starts[i].Value));
-                    sb.Append(",\"ticks\":").Append(starts[i].Key.ToString(CultureInfo.InvariantCulture));
-                    sb.Append('}');
-                }
-                sb.Append(']');
-                starts.Clear();
-                return sb.ToString();
-            }
-        }
-
-        public static bool Active { get { lock (gate) return watcher != null; } }
-
-        public static void Stop()
-        {
-            lock (gate)
-            {
-                if (watcher != null)
-                {
-                    try { watcher.Enabled = false; } catch { }
-                    try { watcher.Dispose(); } catch { }
-                    watcher = null;
-                }
-            }
-        }
-    }
+    // Process starts are derived by comparing process-name snapshots in music.ps1.
+    // An ETW subscription through the kernel provider was tried and removed: enabling the
+    // analytic channel needs `wevtutil sl ... /e:true`, which hangs indefinitely on some
+    // hosts even when elevated, and it left the probe unreachable for the whole session.
 }

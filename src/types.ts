@@ -61,7 +61,7 @@ export interface ProbeSnapshot {
   at: number;
   audio: AudioFeatures;
   sessions: AudioSessionRow[];
-  /** 自上次快照以来新出现的进程。管理员（ETW）时是精确的启动时刻，否则是快照差分。 */
+  /** 自上次快照以来新出现的进程，由进程名单差分得出；ticks 目前恒为 0。 */
   starts: Array<{ name: string; ticks: number }>;
   media: MediaSession[];
 }
@@ -70,9 +70,9 @@ export interface ProbeSnapshot {
 export interface ProbeCapabilities {
   admin: boolean;
   smtc: boolean;
-  etw: boolean;
-  etwError: string;
   loopbackError: string;
+  /** 进程启动是怎么得来的；目前恒为快照差分。 */
+  startsNote: string;
   powershell: string;
 }
 

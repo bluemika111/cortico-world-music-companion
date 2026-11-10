@@ -3,7 +3,7 @@
 # BOM-less script as ANSI, so a single non-ASCII byte would break parsing.
 #
 # stdin, one JSON object per line:
-#   {"id":1,"cmd":"hello"}        capabilities: SMTC, loopback, elevation, ETW state
+  #   {"id":1,"cmd":"hello"}        capabilities: SMTC, loopback, elevation
 #   {"id":2,"cmd":"snapshot"}     everything below in one answer
 #   {"id":3,"cmd":"reopen"}       rebuild the loopback client after an output-device change
 #   {"id":4,"cmd":"stop"}         answer, then exit
@@ -20,7 +20,6 @@ $ProgressPreference = 'SilentlyContinue'
 
 $script:hasSmtc = $false
 $script:engineError = ''
-$script:procWatchError = ''
 $script:admin = $false
 
 try {
@@ -148,16 +147,15 @@ function Get-MediaJson {
 
 # --- process starts --------------------------------------------------------------------------
 
-# Elevated builds read real ETW process events. Without elevation the analytic channel cannot be
-# turned on, so the same fact comes from differencing process-name snapshots. Both feed the same
-# "starts" array; the ticks are only present on the ETW path.
+# Two adjacent process-name snapshots, differenced. An ETW subscription through the kernel
+# provider was the original plan and is gone: enabling its analytic channel needs
+# `wevtutil sl ... /e:true`, which hangs indefinitely on some hosts even when elevated. That call
+# used to run before this loop started, so the whole probe became unreachable — the host saw no
+# answer at all. Differencing answers the same question for a five-second poll, with no
+# privilege requirement.
 $script:seenProcs = $null
 
 function Get-NewProcesses {
-  try {
-    if ([CooMusic.ProcWatch]::Active) { return [CooMusic.ProcWatch]::Drain() }
-  } catch { }
-
   $current = @{}
   try {
     foreach ($p in (Get-Process -ErrorAction SilentlyContinue)) {
@@ -190,15 +188,6 @@ function Get-NewProcesses {
 $script:hasSmtc = Initialize-Smtc
 $script:engineError = [CooMusic.Engine]::Start()
 
-# The kernel process provider needs elevation. Without it the host falls back to comparing
-# process snapshots, which is why a failed start is reported rather than raised.
-try {
-  if ($script:admin) { $script:procWatchError = [CooMusic.ProcWatch]::Start() }
-  else { $script:procWatchError = 'not elevated' }
-} catch {
-  $script:procWatchError = $_.Exception.Message
-}
-
 # --- command loop ----------------------------------------------------------------------------
 
 $running = $true
@@ -220,12 +209,9 @@ while ($running) {
 
   try {
     if ($cmd -eq 'hello') {
-      $etw = 'false'
-      try { if ([CooMusic.ProcWatch]::Active) { $etw = 'true' } } catch { }
       $msg = '{"id":' + $id + ',"ok":true,"admin":' + $script:admin.ToString().ToLowerInvariant() +
         ',"smtc":' + $script:hasSmtc.ToString().ToLowerInvariant() +
-        ',"etw":' + $etw +
-        ',"etwError":' + (Esc $script:procWatchError) +
+        ',"startsSource":' + (Esc 'snapshot differencing') +
         ',"loopbackError":' + (Esc $script:engineError) +
         ',"powershell":' + (Esc $PSVersionTable.PSVersion.ToString()) + '}'
       Send-Raw $msg
@@ -257,4 +243,3 @@ while ($running) {
 }
 
 try { [CooMusic.Engine]::Stop() } catch { }
-try { [CooMusic.ProcWatch]::Stop() } catch { }

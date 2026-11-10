@@ -3,11 +3,24 @@
  * World 进程只经 stdio 要结果：声卡句柄与成百兆采样不跨进程，子进程崩了也不带走 World。
  */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { AudioFeatures, AudioSessionRow, MediaSession, ProbeCapabilities, ProbeSnapshot } from '../types.ts';
 
 const SCRIPT = fileURLToPath(new URL('../../scripts/music.ps1', import.meta.url));
-const POWERSHELL = 'powershell.exe';
+
+/**
+ * Windows PowerShell 的绝对路径。宿主是 Electron 应用，它的 PATH 里不一定有
+ * `System32\WindowsPowerShell\v1.0`，只写裸命令名会在那种环境里直接 spawn 失败。
+ */
+function powershellPath(): string {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows';
+  const full = join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  return existsSync(full) ? full : 'powershell.exe';
+}
+
+const POWERSHELL = powershellPath();
 const HELLO_TIMEOUT_MS = 20_000;
 const SNAPSHOT_TIMEOUT_MS = 8_000;
 
@@ -18,8 +31,8 @@ interface Reply {
   fatal?: string;
   admin?: boolean;
   smtc?: boolean;
-  etw?: boolean;
-  etwError?: string;
+  /** hello 回复里的进程启动来源说明，与 snapshot 的 starts 数组不是同一个字段。 */
+  startsSource?: string;
   loopbackError?: string;
   powershell?: string;
   at?: number;
@@ -59,8 +72,7 @@ export class WindowsMusicProbe implements MusicProbe {
     const caps: ProbeCapabilities = {
       admin: reply.admin === true,
       smtc: reply.smtc === true,
-      etw: reply.etw === true,
-      etwError: typeof reply.etwError === 'string' ? reply.etwError : '',
+      startsNote: typeof reply.startsSource === 'string' ? reply.startsSource : '',
       loopbackError: typeof reply.loopbackError === 'string' ? reply.loopbackError : '',
       powershell: typeof reply.powershell === 'string' ? reply.powershell : '',
     };

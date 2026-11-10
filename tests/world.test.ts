@@ -47,7 +47,23 @@ function fakeProbe(initial = snapshot([media()])): MusicProbe & { current: Probe
   const probe = {
     current: initial,
     async capabilities(): Promise<ProbeCapabilities> {
-      return { admin: false, smtc: true, etw: false, etwError: 'not elevated', loopbackError: '', powershell: '5.1' };
+      return { admin: false, smtc: true, startsNote: 'snapshot differencing', loopbackError: '', powershell: '5.1' };
+    },
+    async snapshot() { return probe.current; },
+    async reopen() { return ''; },
+    close() {},
+  };
+  return probe;
+}
+
+/** 模拟开机时系统媒体服务还没就绪：能力探测会连续失败。 */
+function flakyProbe(initial = snapshot([media()])) {
+  const probe = {
+    current: initial,
+    failCapabilities: true,
+    async capabilities(): Promise<ProbeCapabilities> {
+      if (probe.failCapabilities) throw new Error('spawn EPERM');
+      return { admin: false, smtc: true, startsNote: 'snapshot differencing', loopbackError: '', powershell: '5.1' };
     },
     async snapshot() { return probe.current; },
     async reopen() { return ''; },
@@ -78,8 +94,7 @@ async function drive(world: MusicWorld): Promise<void> {
   await new Promise((r) => setTimeout(r, 20));
 }
 
-describe('Music World', () => {
-  it('干装载不报失败：装载器会接受它', async () => {
+describe('Music World', () => {  it('干装载不报失败：装载器会接受它', async () => {
     const report = await dryMountWorld(MUSIC, { scratchDir });
     expect(report.failures).toEqual([]);
   });
@@ -226,6 +241,54 @@ describe('Music World', () => {
     await world.start(host);
     expect(host.events).toEqual([]);
     expect(world.tools()).toHaveLength(3);
+    await world.stop();
+  });
+
+  it('探测子进程第一次起不来时，过一会儿自己恢复', async () => {
+    const probe = flakyProbe();
+    let now = 1_000;
+    const world = make({}, probe, () => now);
+    const host = new FakeHost();
+    await world.start(host);
+    await drive(world);
+    expect(host.events).toEqual([]); // 起不来就什么也不报
+
+    probe.failCapabilities = false;
+    now += 30_000;
+    await drive(world);
+    expect(host.events).toEqual([]); // 还在退避窗口里，不去反复起进程
+
+    now += 40_000;
+    await drive(world);
+    expect(host.events.map((e) => e.type)).toEqual(['music.started']);
+    await world.stop();
+  });
+
+  it('面板扫描不等退避，立刻就重试', async () => {
+    const probe = flakyProbe();
+    const world = make({}, probe, () => 1_000);
+    await world.start(new FakeHost());
+    await drive(world);
+    probe.failCapabilities = false;
+
+    const decl = world.webUi!();
+    const reply = await decl.invoke!('players', 'scan', []) as { rows: Array<{ app: string }> };
+    expect(reply.rows.map((row) => row.app)).toContain('Spotify.exe');
+    await world.stop();
+  });
+
+  it('探测子进程还没起来时，面板说明清楚而不是说系统没有媒体会话', async () => {
+    const probe = flakyProbe();
+    const world = make({}, probe, () => 1_000);
+    await world.start(new FakeHost());
+    await drive(world);
+
+    const decl = world.webUi!();
+    const reply = await decl.invoke!('players', 'scan', []) as { rows: unknown[]; note?: string };
+    expect(reply.rows).toEqual([]);
+    // 面板要把真正的原因说出来，而不是笼统地说"读不到媒体会话"。
+    expect(reply.note).toContain('spawn EPERM');
+    expect(reply.note).toContain('重试');
     await world.stop();
   });
 });

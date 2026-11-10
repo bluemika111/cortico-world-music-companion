@@ -102,11 +102,12 @@ WASAPI loopback 拿的是默认输出设备上混音后的数据，因此整机�
 
 1. **系统媒体会话（SMTC）**：哪个应用在放、放的是什么。
 2. **音频会话枚举**：哪个进程此刻在往默认输出设备送声音。
-3. **进程启动**：提权时订阅内核进程事件（ETW）；未提权时退回相邻两次快照的差分。
+3. **进程启动**：比较相邻两次的进程名单，新增的就是刚启动的。
 
-第 3 步的 ETW 需要管理员：`Microsoft-Windows-Kernel-Process/Analytic` 通道默认关闭，
-标准用户无法启用。Coopanion 通常不以管理员运行，所以这条路径大多不会走到，
-它存在只是为了让提权部署能拿到精确的启动时刻。
+第 3 步原本打算用内核提供者的 ETW 订阅，已经去掉。启用它的 analytic 通道要靠
+`wevtutil sl … /e:true`，这条命令在部分机器上即使提权也会一直挂住；它又跑在命令循环之前，
+一旦挂住，整个探测就再也接不到任何请求——外部表现正是面板说「读不到媒体会话」。
+对一个五秒一次的轮询来说，差分给出的是同一个事实，而且不需要提权。
 
 ## 面板「播放器」
 
@@ -162,7 +163,7 @@ corepack pnpm run build     # 面板产物 dist/webui.js；仓库里已经带了
 
 ## 平台
 
-Windows 专用。媒体会话、WASAPI loopback、音频会话枚举与 ETW 都在一个常驻的
+Windows 专用。媒体会话、WASAPI loopback 与音频会话枚举都在一个常驻的
 Windows PowerShell 子进程里（`scripts/music.ps1` + `scripts/audio-engine.cs`，
 后者在启动时由 `Add-Type` 编译）。系统自带的 PowerShell 5.1 就够，不需要 .NET SDK、
 原生模块或任何下载。其他系统上 World 照常挂载，但记一条日志、不发事件。
