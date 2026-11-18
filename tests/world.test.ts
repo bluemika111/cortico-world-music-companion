@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ToolCallContext } from 'cortico/core/types.ts';
@@ -107,9 +107,11 @@ describe('Music World', () => {  it('干装载不报失败：装载器会接受�
     }
   });
 
-  it('报出三个工具的名字与环境提示词模板', () => {
+  it('报出五个工具的名字与环境提示词模板', () => {
     const world = MUSIC.create(fakeWorldContext(MUSIC, { scratchDir }));
-    expect(world.tools().map((t) => t.name)).toEqual(['music_now', 'music_lyrics', 'music_history']);
+    expect(world.tools().map((t) => t.name)).toEqual([
+      'music_now', 'music_lyrics', 'music_history', 'music_feel', 'music_taste',
+    ]);
     expect(world.envPromptVars()).toEqual({});
     const docs = world.webUi!().promptDocs ?? [];
     expect(docs.map((d) => d.role)).toEqual(['envPrompt']);
@@ -240,7 +242,7 @@ describe('Music World', () => {  it('干装载不报失败：装载器会接受�
     const host = new FakeHost();
     await world.start(host);
     expect(host.events).toEqual([]);
-    expect(world.tools()).toHaveLength(3);
+    expect(world.tools()).toHaveLength(5);
     await world.stop();
   });
 
@@ -289,6 +291,86 @@ describe('Music World', () => {  it('干装载不报失败：装载器会接受�
     // 面板要把真正的原因说出来，而不是笼统地说"读不到媒体会话"。
     expect(reply.note).toContain('spawn EPERM');
     expect(reply.note).toContain('重试');
+    await world.stop();
+  });
+
+  it('music_feel 记下她的表态，写进自己的记录文件', async () => {
+    const probe = fakeProbe();
+    const world = make({}, probe, () => 0);
+    await world.start(new FakeHost());
+    await drive(world);
+
+    const feel = world.tools().find((t) => t.name === 'music_feel')!;
+    const receipt = String(await feel.handler({ verdict: 'like', note: '前奏一响就想起高二' }, {} as ToolCallContext));
+    expect(receipt).toContain('Radiohead《Creep》');
+    expect(receipt).toContain('前奏一响就想起高二');
+
+    const file = join(scratchDir, 'music-taste.jsonl');
+    expect(existsSync(file)).toBe(true);
+    const row = JSON.parse(readFileSync(file, 'utf8').trim());
+    expect(row).toMatchObject({ verdict: 'like', title: 'Creep', artist: 'Radiohead' });
+    await world.stop();
+  });
+
+  it('同一首再表态时覆盖旧的，事件正文带的是最新那句', async () => {
+    const probe = fakeProbe();
+    let now = 0;
+    const world = make({}, probe, () => now);
+    const host = new FakeHost();
+    await world.start(host);
+    await drive(world);
+
+    const feel = world.tools().find((t) => t.name === 'music_feel')!;
+    await feel.handler({ verdict: 'dislike', note: '太吵' }, {} as ToolCallContext);
+    now += 60_000;
+    await feel.handler({ verdict: 'like', note: '后来听懂了' }, {} as ToolCallContext);
+
+    // 换一首再换回来，让正文重新组装一次。
+    probe.current = snapshot([media({ title: 'Other', artist: 'Muse' })]);
+    now += 60_000;
+    await drive(world);
+    probe.current = snapshot([media()]);
+    now += 60_000;
+    await drive(world);
+
+    const last = host.events[host.events.length - 1];
+    expect(last.text).toContain('后来听懂了');
+    expect(last.text).not.toContain('太吵');
+    await world.stop();
+  });
+
+  it('music_taste 读回她表过态的歌', async () => {
+    const probe = fakeProbe();
+    const world = make({}, probe, () => 0);
+    await world.start(new FakeHost());
+    await drive(world);
+
+    const feel = world.tools().find((t) => t.name === 'music_feel')!;
+    await feel.handler({ verdict: 'like', note: '好听' }, {} as ToolCallContext);
+
+    const taste = world.tools().find((t) => t.name === 'music_taste')!;
+    const text = String(await taste.handler({ days: 30 }, {} as ToolCallContext));
+    expect(text).toContain('Creep');
+    expect(text).toContain('Radiohead');
+    await world.stop();
+  });
+
+  it('没有表态时 music_taste 直说，并指出怎么记', async () => {
+    const world = make({}, fakeProbe(), () => 0);
+    await world.start(new FakeHost());
+    const taste = world.tools().find((t) => t.name === 'music_taste')!;
+    const text = String(await taste.handler({}, {} as ToolCallContext));
+    expect(text).toContain('还没有对任何一首歌表过态');
+    await world.stop();
+  });
+
+  it('music_feel 拒绝不认识的态度', async () => {
+    const world = make({}, fakeProbe(), () => 0);
+    await world.start(new FakeHost());
+    await drive(world);
+    const feel = world.tools().find((t) => t.name === 'music_feel')!;
+    const text = String(await feel.handler({ verdict: 'meh' }, {} as ToolCallContext));
+    expect(text).toContain('bad input');
     await world.stop();
   });
 });

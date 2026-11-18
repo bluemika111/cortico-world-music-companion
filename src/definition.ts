@@ -27,6 +27,14 @@ export const MUSIC: WorldDefinition<MusicConfigSection> = {
         zh: '报出最近几天听过哪些歌、各听了多久，读到的是本 World 自己的记录。',
         en: "Reports which tracks were listened to over the last days, from this World's own records.",
       },
+      music_feel: {
+        zh: '记下她自己对此刻这首歌的态度与一句感受；同一首再记会覆盖旧的。',
+        en: 'Records her own reaction to the track playing now, replacing what she said before about the same track.',
+      },
+      music_taste: {
+        zh: '读回她自己表过态的歌：喜欢的、不太喜欢的，以及反复出现的歌手。',
+        en: 'Reads back the tracks she has spoken about: liked, disliked, and the artists she keeps returning to.',
+      },
     }),
     events: [
       {

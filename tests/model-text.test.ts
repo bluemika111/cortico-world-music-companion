@@ -53,6 +53,7 @@ function parts(overrides: Partial<EventParts> = {}): EventParts {
     lyrics: null,
     lyricsNote: '',
     trackNote: '',
+    taste: '',
     ...overrides,
   };
 }

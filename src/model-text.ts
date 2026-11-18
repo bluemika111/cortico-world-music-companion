@@ -27,6 +27,8 @@ export interface EventParts {
   lyricsNote: string;
   /** 曲目为什么没给。空串表示元数据可用。 */
   trackNote: string;
+  /** 她自己以前对这首说过的话；空串表示没说过。 */
+  taste: string;
 }
 
 /** 一个 World 自己的记录：听过的歌与时长。 */
@@ -175,6 +177,8 @@ function block(
   } else if (parts.lyricsNote) {
     lines.push(`（歌词这一段已跳过：${parts.lyricsNote}。）`);
   }
+
+  if (parts.taste) lines.push(parts.taste);
 
   return lines.join('\n');
 }

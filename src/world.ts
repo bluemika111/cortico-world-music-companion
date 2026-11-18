@@ -25,11 +25,25 @@ import {
 } from './model-text.ts';
 import { createMusicProbe, type MusicProbe } from './probe/audio.ts';
 import { LIMITS, checkText } from './sanitize.ts';
+import {
+  isVerdict,
+  latestByTrack,
+  parseTaste,
+  renderFeelReceipt,
+  renderTaste,
+  renderTasteMemory,
+  type TasteEntry,
+  type TasteView,
+} from './taste.ts';
 import type { AudioFeatures, LyricsView, ProbeSnapshot, TrackIdentity } from './types.ts';
 import { MusicWatcher, pickSession, trackKeyOf, type MusicEvent } from './watcher.ts';
 
 const ENV_PROMPT_FILE = fileURLToPath(new URL('./ENV_PROMPT.md', import.meta.url));
 const RECORD_FILE = 'music-listened.jsonl';
+/** 她自己写下过的话：对哪首歌是什么态度、为什么。 */
+const TASTE_FILE = 'music-taste.jsonl';
+/** 一条感受最多这么长。 */
+const TASTE_NOTE_LIMIT = 160;
 /** 事件正文等歌词等这么久，拿不到就先发。 */
 const LYRICS_WAIT_MS = 1_500;
 /** 探测子进程没起来时的退避；系统媒体服务在开机后的一小段时间里常常还没就绪。 */
@@ -87,6 +101,45 @@ export const MUSIC_TOOL_DECLS: ReadonlyArray<Omit<ToolDef, 'handler'>> = [
       additionalProperties: false,
       properties: {
         days: { type: 'integer', minimum: 1, maximum: 30, description: 'How many days back to count. Default 1.' },
+      },
+    },
+  },
+  {
+    name: 'music_feel',
+    description:
+      'Record your own reaction to the track playing right now: whether you like it, plus one line in your own '
+      + 'words if you have something to say. This is your judgement, not a measurement — write it when it actually '
+      + 'lands. Recording the same track again replaces what you said before.',
+    tags: ['write'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['verdict'],
+      properties: {
+        verdict: {
+          type: 'string',
+          enum: ['like', 'dislike'],
+          description: 'Whether you like this track.',
+        },
+        note: {
+          type: 'string',
+          maxLength: 160,
+          description: 'One line in your own words: what it reminded you of, why it landed or did not. Optional.',
+        },
+      },
+    },
+  },
+  {
+    name: 'music_taste',
+    description:
+      'Read back your own taste in music: the tracks you said you liked, the ones you did not, and which artists '
+      + 'you keep coming back to. Everything it reports is something you said yourself. Read-only.',
+    tags: ['read'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        days: { type: 'integer', minimum: 1, maximum: 365, description: 'How many days back to count. Default 30.' },
       },
     },
   },
@@ -163,6 +216,10 @@ export class MusicWorld implements World {
   /** 预热过的歌词：渲染正文时只读这里，慢的网络不拖住事件。 */
   private readonly warm = new Map<string, Lyrics | null>();
   private lastSnapshot: ProbeSnapshot | null = null;
+  /** 她写下来的口味，按曲目取最新一份。 */
+  private tasteEntries: TasteEntry[] = [];
+  private readonly tasteMap = new Map<string, TasteEntry>();
+  private tasteLoaded = false;
   private readonly localTime: (at: number) => string;
   private readonly clock: () => number;
 
@@ -177,7 +234,7 @@ export class MusicWorld implements World {
   }
 
   tools(): ToolDef[] {
-    return [this.nowTool(), this.lyricsTool(), this.historyTool()];
+    return [this.nowTool(), this.lyricsTool(), this.historyTool(), this.feelTool(), this.tasteTool()];
   }
 
   webUi(language = 'zh'): WorldWebUiDecl {
@@ -214,6 +271,7 @@ export class MusicWorld implements World {
     this.running = true;
     this.watcher = this.newWatcher();
     this.probeRetryAt = 0;
+    void this.ensureTaste();
     // 这里不等探测就绪：系统媒体服务没起来时那一次会失败，挂载不该被它卡住。
     this.schedule();
     void this.tick();
@@ -231,6 +289,9 @@ export class MusicWorld implements World {
     this.probeUnsupported = false;
     this.watcher.reset();
     this.warm.clear();
+    this.tasteEntries = [];
+    this.tasteMap.clear();
+    this.tasteLoaded = false;
     this.host = null;
   }
 
@@ -511,6 +572,7 @@ export class MusicWorld implements World {
       lyrics: view,
       lyricsNote: this.lyricsNoteFor(lyrics),
       trackNote: cleaned.note,
+      taste: cleaned.track ? renderTasteMemory(this.feelFor(cleaned.track.key)) : '',
     };
   }
 
@@ -568,6 +630,45 @@ export class MusicWorld implements World {
       await fs.appendFile(join(dir, RECORD_FILE), `${JSON.stringify(row)}\n`, 'utf8');
     } catch (err) {
       host.log.warn('写入听歌记录失败', { err });
+    }
+  }
+
+  /** 读一次她的口味记录。读取失败只当还没有记录，不挡住事件。 */
+  private async ensureTaste(): Promise<void> {
+    if (this.tasteLoaded) return;
+    this.tasteLoaded = true;
+    const dir = this.opts.dataDir;
+    if (!dir) return;
+    let raw: string;
+    try {
+      raw = await fs.readFile(join(dir, TASTE_FILE), 'utf8');
+    } catch {
+      return; // 还没有这条文件
+    }
+    for (const line of raw.split('\n')) {
+      const entry = parseTaste(line);
+      if (entry) this.tasteEntries.push(entry);
+    }
+    for (const [key, entry] of latestByTrack(this.tasteEntries)) this.tasteMap.set(key, entry);
+  }
+
+  /** 她自己以前在这首歌上说过的话；没说过就是 null。 */
+  private feelFor(trackKey: string): TasteView | null {
+    const entry = this.tasteMap.get(trackKey);
+    if (!entry) return null;
+    return { verdict: entry.verdict, note: entry.note, at: entry.at };
+  }
+
+  private async appendTaste(host: WorldHost, entry: TasteEntry): Promise<void> {
+    this.tasteEntries.push(entry);
+    this.tasteMap.set(entry.track, entry);
+    const dir = this.opts.dataDir;
+    if (!dir) return;
+    try {
+      await fs.mkdir(dir, { recursive: true });
+      await fs.appendFile(join(dir, TASTE_FILE), `${JSON.stringify(entry)}\n`, 'utf8');
+    } catch (err) {
+      host.log.warn('写入音乐口味失败', { err });
     }
   }
 
@@ -634,6 +735,7 @@ export class MusicWorld implements World {
       lyrics: view,
       lyricsNote: this.lyricsNoteFor(lyrics),
       trackNote: cleaned.note,
+      taste: cleaned.track ? renderTasteMemory(this.feelFor(cleaned.track.key)) : '',
     };
   }
 
@@ -668,6 +770,85 @@ export class MusicWorld implements World {
         const ahead = Math.min(5, Math.max(0, Number(args.ahead) || 2));
         const rows = lyricWindowAt(lyrics, chosen.positionSec, ahead);
         return renderLyricWindow(cleaned.track, rows);
+      },
+    };
+  }
+
+  /**
+   * 她自己对这首歌的表态。World 只负责「记下她说的」和「下次原样递回去」，
+   * 不判断这首歌好不好，也不替她生成感受。
+   */
+  private feelTool(): ToolDef {
+    return {
+      ...MUSIC_TOOL_DECLS[3],
+      handler: async (args: Record<string, unknown>) => {
+        const host = this.host;
+        if (!host) return '这个 World 还没启动，记不了。';
+        const verdict = isVerdict(args.verdict) ? args.verdict : null;
+        if (!verdict) return '[bad input] verdict must be "like" or "dislike"';
+
+        const probe = await this.ensureProbe();
+        if (!probe) {
+          return `探测子进程还没起来${this.probeLastError ? `（${this.probeLastError}）` : ''}，不知道现在放的是哪首。`;
+        }
+        let snapshot: ProbeSnapshot;
+        try {
+          snapshot = this.filterSnapshot(await probe.snapshot());
+        } catch (err) {
+          return `探测失败：${err instanceof Error ? err.message : String(err)}`;
+        }
+        const chosen = pickSession(snapshot);
+        if (!chosen) return '此刻没有在放歌，没有可记的对象。';
+
+        const cleaned = this.sanitizeTrack(rawTrack(chosen));
+        if (!cleaned.track) {
+          return `这首歌的曲目信息不可用（${cleaned.note || '曲名为空'}），记下来也对不上号。`;
+        }
+
+        await this.ensureTaste();
+        const note = checkText(String(args.note ?? ''), TASTE_NOTE_LIMIT).text;
+        const entry: TasteEntry = {
+          at: new Date(this.clock()).toISOString(),
+          track: cleaned.track.key,
+          title: cleaned.track.title,
+          artist: cleaned.track.artist,
+          verdict,
+          note,
+        };
+        await this.appendTaste(host, entry);
+        const seen = this.tasteEntries.filter((row) => row.track === entry.track).length;
+        return renderFeelReceipt(cleaned.track, verdict, note, seen);
+      },
+    };
+  }
+
+  /** 她的口味档案：只列她自己表过态的歌。 */
+  private tasteTool(): ToolDef {
+    return {
+      ...MUSIC_TOOL_DECLS[4],
+      handler: async (args: Record<string, unknown>) => {
+        await this.ensureTaste();
+        const days = Math.min(365, Math.max(1, Number(args.days) || 30));
+        const since = this.clock() - days * 86_400_000;
+        const recent = [...this.tasteMap.values()].filter((entry) => {
+          const at = Date.parse(entry.at);
+          return Number.isFinite(at) && at >= since;
+        });
+        const byNewest = (a: TasteEntry, b: TasteEntry) => b.at.localeCompare(a.at);
+        const liked = recent.filter((entry) => entry.verdict === 'like').sort(byNewest);
+        const disliked = recent.filter((entry) => entry.verdict === 'dislike').sort(byNewest);
+
+        const byArtist = new Map<string, { name: string; liked: number; disliked: number }>();
+        for (const entry of recent) {
+          if (!entry.artist) continue;
+          const key = entry.artist.toLowerCase();
+          const row = byArtist.get(key) ?? { name: entry.artist, liked: 0, disliked: 0 };
+          if (entry.verdict === 'like') row.liked += 1;
+          else row.disliked += 1;
+          byArtist.set(key, row);
+        }
+
+        return renderTaste({ liked, disliked, artists: [...byArtist.values()], total: recent.length }, days);
       },
     };
   }

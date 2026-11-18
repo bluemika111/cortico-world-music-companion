@@ -1,6 +1,6 @@
 {
   "name": "cortico-world-music-companion",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "type": "module",
   "description": "Music Companion — a Cortico World that lets the bot hear what this machine is playing: the track, what it sounds like, and the lyric line being sung right now",
   "license": "MIT",
@@ -48,7 +48,8 @@
     "tags": [
       "internet",
       "apps",
-      "sensitive-data"
+      "sensitive-data",
+      "internal-state"
     ],
     "describe": "describe.json"
   },
